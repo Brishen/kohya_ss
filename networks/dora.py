@@ -117,6 +117,10 @@ class DoRAModule(torch.nn.Module):
             self.scale = 1.0
             self.alpha = 1.0
 
+            # same as microsoft's
+            torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
+            torch.nn.init.zeros_(self.lora_up.weight)
+
         self.multiplier = multiplier
         self.org_module = org_module  # remove in applying
         self.dropout = dropout

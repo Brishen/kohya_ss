@@ -780,7 +780,7 @@ def train_model(
         network_module = "lycoris.kohya"
         network_args = f' "preset={LyCORIS_preset}" "rank_dropout={rank_dropout}" "module_dropout={module_dropout}" "use_tucker={use_tucker}" "use_scalar={use_scalar}" "rank_dropout_scale={rank_dropout_scale}" "algo=full" "train_norm={train_norm}"'
 
-    if LoRA_type in ["Kohya LoCon", "Standard"]:
+    if LoRA_type in ["Kohya LoCon", "Standard", "DoRA"]:
         kohya_lora_var_list = [
             "down_lr_weight",
             "mid_lr_weight",
@@ -1104,6 +1104,7 @@ def lora_tab(
                     LoRA_type = gr.Dropdown(
                         label="LoRA type",
                         choices=[
+                            "DoRA",
                             "Kohya DyLoRA",
                             "Kohya LoCon",
                             "LoRA-FA",

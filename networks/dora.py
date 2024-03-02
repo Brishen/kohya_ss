@@ -81,13 +81,16 @@ class DoRAModule(nn.Module):
             self.is_conv = True
             in_dim = org_module.in_channels
             out_dim = org_module.out_channels
-            self.org_module = nn.Conv2d(in_dim, out_dim, org_module.kernel_size, org_module.stride, org_module.padding,
-                                        bias=False)
+            self.lora_down = nn.Conv2d(in_dim, self.lora_dim, org_module.kernel_size, org_module.stride,
+                                       org_module.padding,
+                                       bias=False)
+            self.lora_up = nn.Conv2d(self.lora_dim, out_dim, org_module.kernel_size, org_module.stride,
+                                     org_module.padding,
+                                     bias=False)
         else:
             self.is_conv = False
             in_dim = org_module.in_features
             out_dim = org_module.out_features
-            self.org_module = nn.Linear(in_dim, out_dim, bias=False)
 
         self.org_module.weight = nn.Parameter(org_module.weight.data.clone(), requires_grad=False)
         if org_module.bias is not None:
@@ -102,8 +105,10 @@ class DoRAModule(nn.Module):
 
         # DoRA specific parameters
         std_dev = math.sqrt(2. / (in_dim + self.lora_dim))
-        self.lora_A = nn.Parameter(torch.randn(out_dim, self.lora_dim) * std_dev)
-        self.lora_B = nn.Parameter(torch.zeros(self.lora_dim, in_dim))
+        self.down_lora_A = nn.Parameter(torch.randn(out_dim, self.lora_dim) * std_dev)
+        self.down_lora_B = nn.Parameter(torch.zeros(self.lora_dim, in_dim))
+        self.up_lora_A = nn.Parameter(torch.randn(out_dim, self.lora_dim) * std_dev)
+        self.up_lora_B = nn.Parameter(torch.zeros(self.lora_dim, in_dim))
         self.m = nn.Parameter(self.org_module.weight.norm(p=2, dim=1, keepdim=True),
                               requires_grad=False)  # Column-wise norm
 
@@ -119,25 +124,33 @@ class DoRAModule(nn.Module):
         # Apply rank and normal dropout if specified
         if self.rank_dropout is not None and self.training:
             mask = torch.rand((self.lora_dim,), device=x.device) > self.rank_dropout
-            adapted_lora_B = self.lora_B * mask
+            adapted_lora_B = self.down_lora_B * mask
         else:
-            adapted_lora_B = self.lora_B
+            adapted_lora_B = self.down_lora_B
 
         if self.dropout is not None and self.training:
             x = F.dropout(x, p=self.dropout)
 
         # DoRA computation
-        lora = torch.matmul(self.lora_A, adapted_lora_B)
-        adapted_weight = self.org_module.weight + lora * self.multiplier
-        column_norm = adapted_weight.norm(p=2, dim=1, keepdim=True)
-        norm_adapted_weight = adapted_weight / column_norm * self.m
+        lora_down = torch.matmul(self.down_lora_A, self.down_lora_B)
+        down_adapted_weight = self.org_module.weight + lora_down * self.multiplier
+        down_column_norm = down_adapted_weight.norm(p=2, dim=1, keepdim=True)
+        down_norm_adapted_weight = down_adapted_weight / down_column_norm * self.m
+
+        lora_up = torch.matmul(self.up_lora_A, self.up_lora_B)
+        up_adapted_weight = down_norm_adapted_weight + lora_up * self.multiplier
+        up_column_norm = up_adapted_weight.norm(p=2, dim=0, keepdim=True)
+        up_norm_adapted_weight = up_adapted_weight / up_column_norm
 
         # Apply adapted weights
         if self.is_conv:
-            return F.conv2d(x, norm_adapted_weight, self.org_module.bias, self.org_module.stride,
+            return F.conv2d(x, down_norm_adapted_weight, self.org_module.bias, self.org_module.stride,
                             self.org_module.padding)
         else:
-            return F.linear(x, norm_adapted_weight, self.org_module.bias)
+            return (self.org_forward(x)
+             + F.linear(x, down_norm_adapted_weight, self.org_module.bias)
+             + F.linear(x, up_norm_adapted_weight, self.org_module.bias)
+             )
 
 
 class DoRAInfModule(DoRAModule):
@@ -158,7 +171,7 @@ class DoRAInfModule(DoRAModule):
 
         # check regional or not by lora_name
         self.text_encoder = False
-        if lora_name.startswith("lora_te_"):
+        if lora_name.startswith("dora_te_"):
             self.regional = False
             self.use_sub_prompt = True
             self.text_encoder = True
@@ -776,12 +789,12 @@ class DoRANetwork(torch.nn.Module):
     UNET_TARGET_REPLACE_MODULE = ["Transformer2DModel"]
     UNET_TARGET_REPLACE_MODULE_CONV2D_3X3 = ["ResnetBlock2D", "Downsample2D", "Upsample2D"]
     TEXT_ENCODER_TARGET_REPLACE_MODULE = ["CLIPAttention", "CLIPMLP"]
-    LORA_PREFIX_UNET = "lora_unet"
-    LORA_PREFIX_TEXT_ENCODER = "lora_te"
+    LORA_PREFIX_UNET = "dora_unet"
+    LORA_PREFIX_TEXT_ENCODER = "dora_te"
 
     # SDXL: must starts with LORA_PREFIX_TEXT_ENCODER
-    LORA_PREFIX_TEXT_ENCODER1 = "lora_te1"
-    LORA_PREFIX_TEXT_ENCODER2 = "lora_te2"
+    LORA_PREFIX_TEXT_ENCODER1 = "dora_te1"
+    LORA_PREFIX_TEXT_ENCODER2 = "dora_te2"
 
     def __init__(
             self,

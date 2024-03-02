@@ -145,8 +145,7 @@ class DoRAModule(nn.Module):
             return (self.org_forward(x) + self.lora_up(self.lora_down(x)))
         else:
             return (self.org_forward(x)
-                    + F.linear(F.linear(x, down_norm_adapted_weight, self.org_module.bias), up_norm_adapted_weight,
-                               self.org_module.bias)
+                    + F.linear(F.linear(x, down_norm_adapted_weight), up_norm_adapted_weight)
                     )
 
 

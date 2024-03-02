@@ -3,13 +3,10 @@
 # https://github.com/microsoft/LoRA/blob/main/loralib/layers.py
 # https://github.com/cloneofsimo/lora/blob/master/lora_diffusion/lora.py
 
-import math
 import os
 import re
 from typing import Dict, List, Optional, Tuple, Type, Union
 
-import torch
-import torch.nn.functional as F
 from diffusers import AutoencoderKL
 from torch import nn
 from transformers import CLIPTextModel
@@ -56,9 +53,14 @@ class DoRALayer(nn.Module):
         return F.linear(x, calc_weights, self.bias)
 
 
-class DoRAModule(torch.nn.Module):
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class DoRAModule(nn.Module):
     """
-    replaces forward method of the original Linear, instead of replacing the original Linear module.
+    Integrates the DoRA mechanism into the original module, applying dynamic rank adjustment and magnitude normalization.
     """
 
     def __init__(
@@ -72,60 +74,38 @@ class DoRAModule(torch.nn.Module):
             rank_dropout=None,
             module_dropout=None,
     ):
-        """if alpha == 0 or None, alpha is rank (no scaling)."""
         super().__init__()
         self.lora_name = lora_name
 
         if org_module.__class__.__name__ == "Conv2d":
+            self.is_conv = True
             in_dim = org_module.in_channels
             out_dim = org_module.out_channels
+            self.org_module = nn.Conv2d(in_dim, out_dim, org_module.kernel_size, org_module.stride, org_module.padding,
+                                        bias=False)
         else:
+            self.is_conv = False
             in_dim = org_module.in_features
             out_dim = org_module.out_features
+            self.org_module = nn.Linear(in_dim, out_dim, bias=False)
 
-        # if limit_rank:
-        #   self.lora_dim = min(lora_dim, in_dim, out_dim)
-        #   if self.lora_dim != lora_dim:
-        #     logger.info(f"{lora_name} dim (rank) is changed to: {self.lora_dim}")
-        # else:
+        self.org_module.weight = nn.Parameter(org_module.weight.data.clone(), requires_grad=False)
+        if org_module.bias is not None:
+            self.org_module.bias = nn.Parameter(org_module.bias.data.clone(), requires_grad=False)
+
         self.lora_dim = lora_dim
-
-        if org_module.__class__.__name__ == "Conv2d":
-            kernel_size = org_module.kernel_size
-            stride = org_module.stride
-            padding = org_module.padding
-            self.lora_down = torch.nn.Conv2d(in_dim, self.lora_dim, kernel_size, stride, padding, bias=False)
-            self.lora_up = torch.nn.Conv2d(self.lora_dim, out_dim, (1, 1), (1, 1), bias=False)
-            replace_with_dora = False
-        else:
-            self.lora_down = DoRALayer(in_dim, self.lora_dim)
-            self.lora_up = DoRALayer(self.lora_dim, out_dim)
-
-            replace_with_dora = True
-
-        if not replace_with_dora:
-            if type(alpha) == torch.Tensor:
-                alpha = alpha.detach().float().numpy()  # without casting, bf16 causes error
-            alpha = self.lora_dim if alpha is None or alpha == 0 else alpha
-            self.scale = alpha / self.lora_dim
-            self.register_buffer("alpha", torch.tensor(alpha))  # 定数として扱える
-
-            # same as microsoft's
-            torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
-            torch.nn.init.zeros_(self.lora_up.weight)
-        else:
-            self.scale = 1.0
-            self.alpha = 1.0
-
-            # same as microsoft's
-            torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
-            torch.nn.init.zeros_(self.lora_up.weight)
-
+        self.scale = alpha / self.lora_dim if alpha is not None and alpha != 0 else 1.0
         self.multiplier = multiplier
-        self.org_module = org_module  # remove in applying
         self.dropout = dropout
         self.rank_dropout = rank_dropout
         self.module_dropout = module_dropout
+
+        # DoRA specific parameters
+        std_dev = torch.sqrt(2. / (in_dim + self.lora_dim))
+        self.lora_A = nn.Parameter(torch.randn(out_dim, self.lora_dim) * std_dev)
+        self.lora_B = nn.Parameter(torch.zeros(self.lora_dim, in_dim))
+        self.m = nn.Parameter(self.org_module.weight.norm(p=2, dim=1, keepdim=True),
+                              requires_grad=False)  # Column-wise norm
 
     def apply_to(self):
         self.org_forward = self.org_module.forward
@@ -133,37 +113,31 @@ class DoRAModule(torch.nn.Module):
         del self.org_module
 
     def forward(self, x):
-        org_forwarded = self.org_forward(x)
+        if self.module_dropout is not None and self.training and torch.rand(1) < self.module_dropout:
+            return self.org_module(x)
 
-        # module dropout
-        if self.module_dropout is not None and self.training:
-            if torch.rand(1) < self.module_dropout:
-                return org_forwarded
-
-        lx = self.lora_down(x)
-
-        # normal dropout
-        if self.dropout is not None and self.training:
-            lx = torch.nn.functional.dropout(lx, p=self.dropout)
-
-        # rank dropout
+        # Apply rank and normal dropout if specified
         if self.rank_dropout is not None and self.training:
-            mask = torch.rand((lx.size(0), self.lora_dim), device=lx.device) > self.rank_dropout
-            if len(lx.size()) == 3:
-                mask = mask.unsqueeze(1)  # for Text Encoder
-            elif len(lx.size()) == 4:
-                mask = mask.unsqueeze(-1).unsqueeze(-1)  # for Conv2d
-            lx = lx * mask
-
-            # scaling for rank dropout: treat as if the rank is changed
-            # maskから計算することも考えられるが、augmentation的な効果を期待してrank_dropoutを用いる
-            scale = self.scale * (1.0 / (1.0 - self.rank_dropout))  # redundant for readability
+            mask = torch.rand((self.lora_dim,), device=x.device) > self.rank_dropout
+            adapted_lora_B = self.lora_B * mask
         else:
-            scale = self.scale
+            adapted_lora_B = self.lora_B
 
-        lx = self.lora_up(lx)
+        if self.dropout is not None and self.training:
+            x = F.dropout(x, p=self.dropout)
 
-        return org_forwarded + lx * self.multiplier * scale
+        # DoRA computation
+        lora = torch.matmul(self.lora_A, adapted_lora_B)
+        adapted_weight = self.org_module.weight + lora * self.multiplier
+        column_norm = adapted_weight.norm(p=2, dim=1, keepdim=True)
+        norm_adapted_weight = adapted_weight / column_norm * self.m
+
+        # Apply adapted weights
+        if self.is_conv:
+            return F.conv2d(x, norm_adapted_weight, self.org_module.bias, self.org_module.stride,
+                            self.org_module.padding)
+        else:
+            return F.linear(x, norm_adapted_weight, self.org_module.bias)
 
 
 class DoRAInfModule(DoRAModule):

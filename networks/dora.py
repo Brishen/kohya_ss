@@ -132,7 +132,7 @@ class DoRAModule(nn.Module):
         # DoRA computation
         lora_down = torch.matmul(self.down_lora_A, self.down_lora_B)
         down_adapted_weight = lora_down * self.multiplier
-        down_column_norm = down_adapted_weight.norm(p=2, dim=1, keepdim=True)
+        down_column_norm = down_adapted_weight.norm(p=2, dim=0, keepdim=True)
         down_norm_adapted_weight = down_adapted_weight / down_column_norm * self.m
 
         lora_up = torch.matmul(self.up_lora_A, self.up_lora_B)

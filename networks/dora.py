@@ -131,24 +131,23 @@ class DoRAModule(nn.Module):
 
         # DoRA computation
         lora_down = torch.matmul(self.down_lora_A, self.down_lora_B)
-        down_adapted_weight = self.org_module.weight + lora_down * self.multiplier
+        down_adapted_weight = lora_down * self.multiplier
         down_column_norm = down_adapted_weight.norm(p=2, dim=1, keepdim=True)
         down_norm_adapted_weight = down_adapted_weight / down_column_norm * self.m
 
         lora_up = torch.matmul(self.up_lora_A, self.up_lora_B)
-        up_adapted_weight = down_norm_adapted_weight + lora_up * self.multiplier
+        up_adapted_weight = lora_up * self.multiplier
         up_column_norm = up_adapted_weight.norm(p=2, dim=0, keepdim=True)
         up_norm_adapted_weight = up_adapted_weight / up_column_norm
 
         # Apply adapted weights
         if self.is_conv:
-            return F.conv2d(x, down_norm_adapted_weight, self.org_module.bias, self.org_module.stride,
-                            self.org_module.padding)
+            return (self.org_forward(x) + self.lora_up(self.lora_down(x)))
         else:
             return (self.org_forward(x)
-             + F.linear(x, down_norm_adapted_weight, self.org_module.bias)
-             + F.linear(x, up_norm_adapted_weight, self.org_module.bias)
-             )
+                    + F.linear(F.linear(x, down_norm_adapted_weight, self.org_module.bias), up_norm_adapted_weight,
+                               self.org_module.bias)
+                    )
 
 
 class DoRAInfModule(DoRAModule):

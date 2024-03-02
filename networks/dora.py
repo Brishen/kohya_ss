@@ -107,7 +107,9 @@ class DoRAModule(nn.Module):
         self.down_lora_B = nn.Parameter(torch.zeros(self.lora_dim, in_dim))
         self.up_lora_A = nn.Parameter(torch.randn(out_dim, self.lora_dim) * std_dev)
         self.up_lora_B = nn.Parameter(torch.zeros(self.lora_dim, in_dim))
-        self.m = nn.Parameter(self.org_module.weight.norm(p=2, dim=1, keepdim=True),
+        self.down_m = nn.Parameter(self.org_module.weight.norm(p=2, dim=0, keepdim=True),
+                              requires_grad=False)  # Column-wise norm
+        self.up_m = nn.Parameter(self.org_module.weight.norm(p=2, dim=0, keepdim=True),
                               requires_grad=False)  # Column-wise norm
 
     def apply_to(self):
@@ -133,12 +135,12 @@ class DoRAModule(nn.Module):
         lora_down = torch.matmul(self.down_lora_A, self.down_lora_B)
         down_adapted_weight = lora_down * self.multiplier
         down_column_norm = down_adapted_weight.norm(p=2, dim=0, keepdim=True)
-        down_norm_adapted_weight = down_adapted_weight / down_column_norm * self.m
+        down_norm_adapted_weight = down_adapted_weight / down_column_norm * self.down_m
 
         lora_up = torch.matmul(self.up_lora_A, self.up_lora_B)
         up_adapted_weight = lora_up * self.multiplier
         up_column_norm = up_adapted_weight.norm(p=2, dim=0, keepdim=True)
-        up_norm_adapted_weight = up_adapted_weight / up_column_norm
+        up_norm_adapted_weight = up_adapted_weight / up_column_norm * self.up_m
 
         # Apply adapted weights
         if self.is_conv:

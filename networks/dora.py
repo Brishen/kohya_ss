@@ -92,9 +92,7 @@ class DoRAModule(nn.Module):
             in_dim = org_module.in_features
             out_dim = org_module.out_features
 
-        self.org_module.weight = nn.Parameter(org_module.weight.data.clone(), requires_grad=False)
-        if org_module.bias is not None:
-            self.org_module.bias = nn.Parameter(org_module.bias.data.clone(), requires_grad=False)
+        self.org_module = org_module
 
         self.lora_dim = lora_dim
         self.scale = alpha / self.lora_dim if alpha is not None and alpha != 0 else 1.0

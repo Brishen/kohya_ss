@@ -2,7 +2,7 @@
 # reference:
 # https://github.com/microsoft/LoRA/blob/main/loralib/layers.py
 # https://github.com/cloneofsimo/lora/blob/master/lora_diffusion/lora.py
-
+import math
 import os
 import re
 from typing import Dict, List, Optional, Tuple, Type, Union
@@ -101,7 +101,7 @@ class DoRAModule(nn.Module):
         self.module_dropout = module_dropout
 
         # DoRA specific parameters
-        std_dev = torch.sqrt(2. / (in_dim + self.lora_dim))
+        std_dev = math.sqrt(2. / (in_dim + self.lora_dim))
         self.lora_A = nn.Parameter(torch.randn(out_dim, self.lora_dim) * std_dev)
         self.lora_B = nn.Parameter(torch.zeros(self.lora_dim, in_dim))
         self.m = nn.Parameter(self.org_module.weight.norm(p=2, dim=1, keepdim=True),
